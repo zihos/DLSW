@@ -27,7 +27,7 @@ pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https
 git clone https://github.com/zihos/DLSW.git
 cd DLSW
 pip install PySide6
-pip install pillow ultralytics
+pip install pillow ultralytics albumentations
 ```
 
 4. **Install additional dependencies for example notebooks or development:**
