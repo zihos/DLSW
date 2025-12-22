@@ -6,6 +6,7 @@
 - Python 3.10 or higher
 - PyTorch 2.8 or higher
 - CUDA-compatible GPU with CUDA 12.8 or higher
+- anaconda or miniconda
 
 1. **Create a new Conda environment:**
 
@@ -39,6 +40,11 @@ pip install opencv-python pycocotools matplotlib onnxruntime onnx openvino
 
 5. **Click the links below to download the checkpoint for the SAM model.**
 
-- **`default` or `vit_h`: [ViT-H SAM model.](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth)**
+    Copy the checkpoint to `DLSW/dl_software/models/`
 
-Copy the checkpoint to `DLSW/dl_software/models/`
+    **`default` or `vit_h`: [ViT-H SAM model.](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth)**
+
+## Run
+```bash
+python main.py
+```
