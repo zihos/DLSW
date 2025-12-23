@@ -6,7 +6,7 @@
 - Python 3.10 or higher
 - PyTorch 2.8 or higher
 - CUDA-compatible GPU with CUDA 12.8 or higher
-- anaconda or miniconda
+- anaconda ([install](https://www.anaconda.com/download)) or miniconda ([install](https://www.anaconda.com/docs/getting-started/miniconda/install))
 
 1. **Create a new Conda environment:**
 
