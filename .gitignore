@@ -1,0 +1,29 @@
+# datasets / outputs
+data/
+dataset/
+datasets/
+images/
+masks/
+outputs/
+runs/
+results/
+logs/
+
+# workspaces
+/projects
+
+# model checkpoints / weights
+weights/
+checkpoints/
+ckpt/
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# cache / temp
+__pycache__/
+*.pyc
+.cache/
+.tmp/
+tmp/
