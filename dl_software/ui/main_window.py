@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6 import QtCore, QtWidgets
+import os
+import subprocess
+
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from .styles import APP_QSS
 from .tabs import InferTab, LabelTab, TrainTab
@@ -24,7 +27,8 @@ class DLMainWindow(QtWidgets.QMainWindow):
         act_open_project = menu_project.addAction("Open Project…")
         act_open_project.triggered.connect(self._open_project_dialog)
         menu_settings.addAction("Preferences…")
-        menu_help.addAction("About")
+        act_about = menu_help.addAction("About")
+        act_about.triggered.connect(self._open_about)
 
         tabs = QtWidgets.QTabWidget()
         tabs.setDocumentMode(True)
@@ -54,6 +58,27 @@ class DLMainWindow(QtWidgets.QMainWindow):
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.statusBar().showMessage("Ready")
         self._refresh_project_list()
+
+    def _open_about(self):
+        """Open the project wiki in the default browser."""
+        url = "https://github.com/zihos/DLSW/wiki"
+
+        # Launch xdg-open with a cleaned env and silenced stderr to avoid noisy GTK warnings from snap Firefox.
+        env = os.environ.copy()
+        env.pop("GTK_MODULES", None)
+        env.pop("GTK_PATH", None)
+        env.pop("GTK2_RC_FILES", None)
+        try:
+            subprocess.Popen(
+                ["xdg-open", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+            )
+        except Exception:
+            # Fallback to Qt handler if xdg-open is unavailable.
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
 
     def _build_start_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
