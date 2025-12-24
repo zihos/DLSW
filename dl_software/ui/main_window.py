@@ -27,7 +27,7 @@ class DLMainWindow(QtWidgets.QMainWindow):
         act_open_project = menu_project.addAction("Open Project…")
         act_open_project.triggered.connect(self._open_project_dialog)
         menu_settings.addAction("Preferences…")
-        act_about = menu_help.addAction("About")
+        act_about = menu_help.addAction("Wiki")
         act_about.triggered.connect(self._open_about)
 
         tabs = QtWidgets.QTabWidget()
