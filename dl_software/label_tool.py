@@ -52,9 +52,24 @@ except Exception:
 
 try:
     import albumentations as A
-    _AUGMENT_LIB_AVAILABLE = Image is not None
+    try:
+        from albumentations.core.composition import BboxParams as _BBoxParams  # type: ignore
+    except Exception:
+        _BBoxParams = getattr(A, "BboxParams", None)
+    try:
+        from albumentations.core.composition import PolygonParams as _PolygonParams  # type: ignore
+    except Exception:
+        _PolygonParams = getattr(A, "PolygonParams", None)
+    try:
+        from albumentations.core.composition import KeypointParams as _KeypointParams  # type: ignore
+    except Exception:
+        _KeypointParams = getattr(A, "KeypointParams", None)
+    _AUGMENT_LIB_AVAILABLE = Image is not None and _BBoxParams is not None
 except ImportError:
     A = None
+    _BBoxParams = None
+    _PolygonParams = None
+    _KeypointParams = None
     _AUGMENT_LIB_AVAILABLE = False
 
 from .ui.widgets import Header, HSep, TitledGroup
@@ -274,14 +289,11 @@ class AnnotationStore:
           "image_size": [W, H]
         }
       },
-      "meta": {
-        "classes": [ {"name":"object","color":"#00FF00"}, ... ]
-      }
     }
     """
     def __init__(self, path: Path | str | None = None):
         self.path = Path(path) if path else None
-        self._db: dict = {"images": {}, "meta": {"classes": []}}
+        self._db: dict = {"images": {}, "meta": {}}
 
     def set_path(self, p: Path):
         self.path = Path(p)
@@ -290,22 +302,24 @@ class AnnotationStore:
         if not self.path: return
         try:
             if self.path.exists():
-                self._db = json.loads(self.path.read_text(encoding="utf-8"))
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
             else:
                 # New dataset folder without annotations.json yet → start fresh
-                self._db = {"images": {}, "meta": {"classes": []}}
-            if "images" not in self._db or not isinstance(self._db["images"], dict):
-                self._db["images"] = {}
-            if "meta" not in self._db or not isinstance(self._db["meta"], dict):
-                self._db["meta"] = {}
-            if "classes" not in self._db["meta"] or not isinstance(self._db["meta"]["classes"], list):
-                self._db["meta"]["classes"] = []
+                raw = {"images": {}, "meta": {}}
+            images = raw.get("images") if isinstance(raw, dict) else {}
+            meta = raw.get("meta") if isinstance(raw, dict) else {}
+            if not isinstance(images, dict):
+                images = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            self._db = {"images": images, "meta": meta}
         except Exception:
-            self._db = {"images": {}, "meta": {"classes": []}}
+            self._db = {"images": {}, "meta": {}}
 
     def save(self):
         if not self.path: return
-        self.path.write_text(json.dumps(self._db, ensure_ascii=False, indent=2), encoding="utf-8")
+        data = {"images": self._db.get("images", {})}
+        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # image-level
     def get(self, image_path: Path) -> dict:
@@ -319,7 +333,11 @@ class AnnotationStore:
 
     # meta-level (classes)
     def list_classes(self) -> list[dict]:
-        return list(self._db.get("meta", {}).get("classes", []))
+        meta = self._db.get("meta", {})
+        if isinstance(meta, dict):
+            classes = meta.get("classes", [])
+            return list(classes) if isinstance(classes, list) else []
+        return []
 
     def set_classes(self, classes: list[dict]):
         self._db.setdefault("meta", {})["classes"] = classes
@@ -1425,6 +1443,7 @@ class ExportDialog(QDialog):
         self.range_slider.upperValueChanged.connect(self._refresh_train_preview)
         self.range_slider.lowerValueChanged.connect(self._refresh_split_counts)
         self.range_slider.upperValueChanged.connect(self._refresh_split_counts)
+        self.cmb_task.currentIndexChanged.connect(self._refresh_train_preview)
 
         self.chk_enable_aug.toggled.connect(self._update_aug_controls)
         self.spn_aug_multiplier.valueChanged.connect(self._refresh_train_preview)
@@ -1493,9 +1512,11 @@ class ExportDialog(QDialog):
     def _refresh_train_preview(self):
         total = int(self._export_stats.get("total_images") or 0)
         rect_total = int(self._export_stats.get("rect_images") or 0)
+        poly_total = int(self._export_stats.get("poly_images") or 0)
         train_pct, _, _, _, _ = self._get_split_pcts()
         base_train = round(total * train_pct / 100.0)
         rect_train = round(rect_total * train_pct / 100.0)
+        poly_train = round(poly_total * train_pct / 100.0)
 
         multiplier = 1
         if self.chk_enable_aug.isChecked() and _AUGMENT_LIB_AVAILABLE:
@@ -1503,8 +1524,9 @@ class ExportDialog(QDialog):
             if self._aug_details:
                 multiplier = max(1, self.spn_aug_multiplier.value())
         eff_train = base_train if total > 0 else 0
-        if multiplier > 1 and rect_train > 0:
-            eff_train = base_train + rect_train * (multiplier - 1)
+        target_aug = rect_train if self.task() == "detect" else poly_train
+        if multiplier > 1 and target_aug > 0:
+            eff_train = base_train + target_aug * (multiplier - 1)
         self.lbl_train_counts.setText(f"Augmentation copies (x{multiplier}): {eff_train}장")
 
     def _refresh_split_counts(self):
@@ -3736,8 +3758,6 @@ class LabelTool(QMainWindow):
         if not name: return
         self.add_class_text(name)
         self.class_edit.clear()
-        col = self.class_colors.get(name, QColor(0,255,0))
-        self.store.upsert_class(name, self._color_to_hex(col))
         self._schedule_autosave()
         self._update_counts_ui()
 
@@ -3790,7 +3810,6 @@ class LabelTool(QMainWindow):
 
         self.class_colors.pop(name, None)
         self.class_list.takeItem(self.class_list.row(it))
-        self.store.remove_class(name)
         if self.class_list.count()>0:
             self.class_list.setCurrentRow(0)
         else:
@@ -3830,7 +3849,6 @@ class LabelTool(QMainWindow):
         if color is None:
             color = self._next_color(len(self.class_colors))
             self.add_class_text(to_class, color)
-            self.store.upsert_class(to_class, self._color_to_hex(color))
 
         pen = QPen(color, 2)
 
@@ -3910,12 +3928,14 @@ class LabelTool(QMainWindow):
                 if not name:
                     continue
                 classes[name] = entry.get("color", "#00FF00")
-        for entry in self.store.list_classes():
-            name = entry.get("name")
-            if not name:
-                continue
-            if name not in classes:
-                classes[name] = entry.get("color", "#00FF00")
+        # legacy fallback: if meta.json is empty, try annotations.json meta.classes once
+        if not classes:
+            for entry in self.store.list_classes():
+                name = entry.get("name")
+                if not name:
+                    continue
+                if name not in classes:
+                    classes[name] = entry.get("color", "#00FF00")
 
         if not classes:
             seen = []
@@ -3927,7 +3947,6 @@ class LabelTool(QMainWindow):
             for i, name in enumerate(seen):
                 col = self._next_color(i)
                 self.add_class_text(name, col)
-                self.store.upsert_class(name, self._color_to_hex(col))
             self.store.save()
         else:
             for i, (name, color_hex) in enumerate(sorted(classes.items())):
@@ -4346,7 +4365,6 @@ class LabelTool(QMainWindow):
             if color is None and klass:
                 color = self._next_color(len(self.class_colors))
                 self.add_class_text(klass, color)
-                self.store.upsert_class(klass, self._color_to_hex(color))
             if color is None:
                 color = QColor(0, 255, 0)
             r = QRectF(QPointF(x1 + self._clip_offset_dx, y1 + self._clip_offset_dy),
@@ -4363,7 +4381,6 @@ class LabelTool(QMainWindow):
             if color is None and klass:
                 color = self._next_color(len(self.class_colors))
                 self.add_class_text(klass, color)
-                self.store.upsert_class(klass, self._color_to_hex(color))
             if color is None:
                 color = QColor(0, 255, 0)
             pts_off = [QPointF(x + self._clip_offset_dx, y + self._clip_offset_dy) for (x, y) in pts]
@@ -4860,7 +4877,7 @@ class LabelTool(QMainWindow):
 
     def _compute_export_stats(self) -> dict[str, int]:
         """Collect basic export stats for preview labels."""
-        stats = {"total_images": 0, "rect_images": 0}
+        stats = {"total_images": 0, "rect_images": 0, "poly_images": 0}
         try:
             excluded = {str(p.resolve()) for p in self._excluded_paths}
         except Exception:
@@ -4878,11 +4895,15 @@ class LabelTool(QMainWindow):
                 pm = QPixmap(str(p)); self.store.put(p, [], (pm.width(), pm.height()))
         stats["total_images"] = len(imgs)
         rect_images = 0
+        poly_images = 0
         for ipath in imgs:
             rec = self.store.get(Path(ipath))
             if any((sh.get("type") == "rect" and len(sh.get("points", [])) >= 2) for sh in rec.get("shapes", [])):
                 rect_images += 1
+            if any((sh.get("type") == "poly" and len(sh.get("points", [])) >= 3) for sh in rec.get("shapes", [])):
+                poly_images += 1
         stats["rect_images"] = rect_images
+        stats["poly_images"] = poly_images
         return stats
 
     # ====================== YOLO EXPORT ======================
@@ -4985,7 +5006,11 @@ class LabelTool(QMainWindow):
             lbl_dir.mkdir(parents=True, exist_ok=True)
 
         # 메타 → 없으면 실제 주석에서 사용된 클래스 수집
-        classes = [c["name"] for c in self.store.list_classes()]
+        classes = []
+        if self.project_meta:
+            classes = [c.get("name") for c in self.project_meta.classes if c.get("name")]
+        if not classes:
+            classes = [c["name"] for c in self.store.list_classes() if c.get("name")]
         if not classes:
             used = []
             for rec in self.store._db.get("images", {}).values():
@@ -5045,7 +5070,9 @@ class LabelTool(QMainWindow):
                 continue
             rec = self.store.get(Path(ipath))
             has_rect = any((sh.get("type") == "rect" and len(sh.get("points", [])) >= 2) for sh in rec.get("shapes", []))
-            if has_rect:
+            has_poly = any((sh.get("type") == "poly" and len(sh.get("points", [])) >= 3) for sh in rec.get("shapes", []))
+            has_aug_target = has_poly if is_segment else has_rect
+            if has_aug_target:
                 total_ops += max(0, aug_cfg.multiplier - 1)
         done_ops = 0
 
@@ -5133,7 +5160,7 @@ class LabelTool(QMainWindow):
         hh = abs(y2 - y1) / H
         return cx, cy, ww, hh
 
-    def _build_aug_pipeline(self, width: int, height: int, aug_cfg: ExportAugmentationConfig):
+    def _build_aug_pipeline(self, width: int, height: int, aug_cfg: ExportAugmentationConfig, *, allow_polygons: bool = False):
         if not _AUGMENT_LIB_AVAILABLE or width <= 0 or height <= 0:
             return None
         transforms = []
@@ -5214,16 +5241,50 @@ class LabelTool(QMainWindow):
             if "noise" in techniques:
                 transforms.append(A.GaussNoise(var_limit=(10.0, 60.0), p=0.5))
 
-        if not transforms:
+        if not transforms or _BBoxParams is None:
             return None
+        bbox_params = _BBoxParams(
+            format="pascal_voc",
+            label_fields=["class_labels"],
+            min_visibility=0.1,
+            min_area=1
+        )
+        poly_params = None
+        kp_params = None
+        if allow_polygons and _PolygonParams is not None:
+            try:
+                poly_params = _PolygonParams(
+                    format="pascal_voc",
+                    label_fields=["poly_labels"],
+                    min_visibility=0.1,
+                    min_area=1
+                )
+            except Exception:
+                poly_params = None
+        elif allow_polygons and _PolygonParams is None and _KeypointParams is not None:
+            try:
+                kp_params = _KeypointParams(
+                    format="xy",
+                    label_fields=["kp_labels"],
+                    remove_invisible=False
+                )
+            except Exception:
+                kp_params = None
+        if poly_params is not None:
+            return A.Compose(
+                transforms,
+                bbox_params=bbox_params,
+                polygon_params=poly_params
+            )
+        if kp_params is not None:
+            return A.Compose(
+                transforms,
+                bbox_params=bbox_params,
+                keypoint_params=kp_params
+            )
         return A.Compose(
             transforms,
-            bbox_params=A.BboxParams(
-                format="pascal_voc",
-                label_fields=["class_labels"],
-                min_visibility=0.1,
-                min_area=1
-            )
+            bbox_params=bbox_params
         )
 
     def _write_augmented_versions(
@@ -5243,28 +5304,41 @@ class LabelTool(QMainWindow):
             return done_ops
         if (not augment_config.techniques and not getattr(augment_config, "details", None)) or not _AUGMENT_LIB_AVAILABLE:
             return done_ops
-        boxes = []
-        labels = []
+        boxes: list[list[float]] = []
+        box_labels: list[str | None] = []
+        polys: list[list[tuple[float, float]]] = []
+        poly_labels: list[str | None] = []
         for sh in rec.get("shapes", []):
-            if sh.get("type") != "rect":
-                continue
             pts = sh.get("points", [])
-            if len(pts) < 2:
-                continue
-            (x1, y1), (x2, y2) = pts[:2]
-            boxes.append([
-                min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
-            ])
-            labels.append(sh.get("class"))
-        if not boxes:
-            return
+            if sh.get("type") == "rect":
+                if len(pts) < 2:
+                    continue
+                (x1, y1), (x2, y2) = pts[:2]
+                boxes.append([
+                    min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+                ])
+                box_labels.append(sh.get("class"))
+            elif sh.get("type") == "poly":
+                if len(pts) < 3:
+                    continue
+                poly = [(float(x), float(y)) for (x, y) in pts]
+                polys.append(poly)
+                poly_labels.append(sh.get("class"))
+        if not boxes and not polys:
+            return done_ops
+        if task == "segment" and not polys:
+            return done_ops
         size = rec.get("image_size") or [None, None]
         W = size[0] or 0
         H = size[1] or 0
         if not W or not H:
             pm = QPixmap(str(ipath))
             W, H = pm.width(), pm.height()
-        pipeline = self._build_aug_pipeline(W, H, augment_config)
+        allow_polys = (task == "segment")
+        use_keypoints = allow_polys and (_PolygonParams is None) and (_KeypointParams is not None)
+        if allow_polys and (_PolygonParams is None) and (not use_keypoints):
+            return done_ops
+        pipeline = self._build_aug_pipeline(W, H, augment_config, allow_polygons=allow_polys)
         if pipeline is None:
             return done_ops
         try:
@@ -5272,15 +5346,61 @@ class LabelTool(QMainWindow):
         except Exception:
             return done_ops
         base_arr = np.array(base_img)
+        keypoints = []
+        kp_labels = []
+        if use_keypoints:
+            for idx_poly, poly in enumerate(polys):
+                for (px, py) in poly:
+                    keypoints.append((px, py))
+                    kp_labels.append(idx_poly)
         for idx in range(1, augment_config.multiplier):
             try:
-                result = pipeline(image=base_arr, bboxes=[list(b) for b in boxes], class_labels=list(labels))
+                kwargs = {
+                    "image": base_arr,
+                    "bboxes": [list(b) for b in boxes],
+                    "class_labels": list(box_labels),
+                }
+                if allow_polys and _PolygonParams is not None:
+                    kwargs.update({
+                        "polygons": [list(p) for p in polys],
+                        "poly_labels": list(poly_labels)
+                    })
+                elif use_keypoints:
+                    kwargs.update({
+                        "keypoints": list(keypoints),
+                        "kp_labels": list(kp_labels)
+                    })
+                result = pipeline(**kwargs)
             except Exception:
                 continue
             aug_boxes = result.get("bboxes") or []
             aug_labels = result.get("class_labels") or []
+            aug_polys = result.get("polygons") or []
+            aug_poly_labels = result.get("poly_labels") or []
+            if use_keypoints:
+                aug_kps = result.get("keypoints") or []
+                aug_kp_labels = result.get("kp_labels") or []
+                grouped = {}
+                for (pt, lab) in zip(aug_kps, aug_kp_labels):
+                    grouped.setdefault(lab, []).append(pt)
+                aug_polys = []
+                aug_poly_labels = []
+                for idx_poly, pts_list in sorted(grouped.items(), key=lambda x: x[0]):
+                    try:
+                        idx_int = int(round(idx_poly))
+                    except Exception:
+                        idx_int = None
+                    lbl = None
+                    if idx_int is not None and 0 <= idx_int < len(poly_labels):
+                        lbl = poly_labels[idx_int]
+                    aug_polys.append(pts_list)
+                    aug_poly_labels.append(lbl)
             aug_img = result.get("image")
-            if not aug_boxes or aug_img is None:
+            if aug_img is None:
+                continue
+            if task == "detect" and not aug_boxes:
+                continue
+            if task == "segment" and not aug_polys:
                 continue
             suffix = ipath.suffix or ".jpg"
             sample_name = f"{ipath.stem}_aug{idx}{suffix}"
@@ -5300,14 +5420,27 @@ class LabelTool(QMainWindow):
                 continue
             h, w = aug_img.shape[:2]
             txt_lines = []
-            for bbox, label in zip(aug_boxes, aug_labels):
-                if len(bbox) != 4 or label is None:
-                    continue
-                cid = cls_to_id.get(label)
-                if cid is None:
-                    continue
-                cx, cy, ww, hh = self._norm_box(bbox[0], bbox[1], bbox[2], bbox[3], float(w), float(h))
-                txt_lines.append(f"{cid} {cx:.6f} {cy:.6f} {ww:.6f} {hh:.6f}")
+            if task == "detect":
+                for bbox, label in zip(aug_boxes, aug_labels):
+                    if len(bbox) != 4 or label is None:
+                        continue
+                    cid = cls_to_id.get(label)
+                    if cid is None:
+                        continue
+                    cx, cy, ww, hh = self._norm_box(bbox[0], bbox[1], bbox[2], bbox[3], float(w), float(h))
+                    txt_lines.append(f"{cid} {cx:.6f} {cy:.6f} {ww:.6f} {hh:.6f}")
+            else:
+                for poly, label in zip(aug_polys, aug_poly_labels):
+                    if label is None or not poly or len(poly) < 3:
+                        continue
+                    cid = cls_to_id.get(label)
+                    if cid is None:
+                        continue
+                    flat = []
+                    for (px, py) in poly:
+                        flat.extend([px/float(w), py/float(h)])
+                    if len(flat) >= 6:
+                        txt_lines.append(f"{cid} " + " ".join(f"{v:.6f}" for v in flat))
             if not txt_lines:
                 try:
                     dst_img.unlink()
