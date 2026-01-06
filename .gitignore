@@ -8,6 +8,8 @@ outputs/
 runs/
 results/
 logs/
+inference_results/
+quickstar_images/
 
 # workspaces
 /projects
