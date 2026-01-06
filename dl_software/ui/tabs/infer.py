@@ -5,6 +5,9 @@ from __future__ import annotations
 from PySide6 import QtCore, QtGui, QtWidgets
 import os
 import time
+import datetime
+import random
+from pathlib import Path
 import numpy as np
 import cv2
 from PySide6.QtCore import Qt
@@ -240,15 +243,17 @@ class InferTab(QtWidgets.QWidget):
 
         exp_box = TitledGroup("Export Results")
         ex = QtWidgets.QHBoxLayout(exp_box)
-        self.btn_export_json = QtWidgets.QPushButton("Export .json")
-        self.btn_export_txt = QtWidgets.QPushButton("Export .txt")
-        self.btn_export_masks = QtWidgets.QPushButton("Export masks")
+        self.btn_export_json = QtWidgets.QPushButton("Exp. as json")
+        self.btn_export_txt = QtWidgets.QPushButton("Exp. as txt")
+        self.btn_export_masks = QtWidgets.QPushButton("Exp. masks")
         self.btn_export_masks.setEnabled(False)
         self.btn_export_masks.clicked.connect(self._export_masks)
+        ex.addStretch(1)
         ex.addWidget(self.btn_export_json)
         ex.addWidget(self.btn_export_txt)
         ex.addWidget(self.btn_export_masks)
         ex.addStretch(1)
+
         rL.addWidget(exp_box)
         rL.addStretch(1)
 
@@ -1171,61 +1176,129 @@ class InferTab(QtWidgets.QWidget):
         self.btn_export_masks.setEnabled(seg_mode)
 
     def _export_masks(self):
-        if not self._current_view_path:
-            QtWidgets.QMessageBox.information(self, "Export masks", "No image selected.")
+        if not self._result_cache:
+            QtWidgets.QMessageBox.information(self, "Export masks", "No inference results to export.")
             return
-        data = self._result_cache.get(self._current_view_path) if hasattr(self, "_result_cache") else None
-        if not data or "masks" not in data:
-            QtWidgets.QMessageBox.information(self, "Export masks", "No masks available for this image.")
+        # Filter only images that have masks
+        exportable = [(path, data) for path, data in self._result_cache.items() if (data.get("masks") is not None)]
+        if not exportable:
+            QtWidgets.QMessageBox.information(self, "Export masks", "No masks available.")
             return
-        masks = data.get("masks")
-        if masks is None:
-            QtWidgets.QMessageBox.information(self, "Export masks", "No masks available for this image.")
+        mode = self._prompt_mask_export_mode()
+        if mode is None:
             return
-        # Determine output path
-        base_dir = os.path.dirname(self._current_view_path)
-        base_name = os.path.splitext(os.path.basename(self._current_view_path))[0]
-        suggested = os.path.join(base_dir, f"{base_name}_mask.png")
-        save_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save mask PNG", suggested, "PNG Images (*.png)")
-        if not save_path:
+        target_dir = self._ask_export_folder("Export masks", for_masks=True)
+        if target_dir is None:
             return
-        # Load original size
-        try:
-            import cv2
-            orig = cv2.imread(self._current_view_path, cv2.IMREAD_GRAYSCALE)
-            H, W = orig.shape[:2]
-        except Exception:
-            pm = self._pm_item.pixmap() if self._pm_item else None
-            if pm is None or pm.isNull():
-                QtWidgets.QMessageBox.warning(self, "Export masks", "Cannot determine image size.")
-                return
-            W = pm.width(); H = pm.height()
-        try:
-            masks_np = np.asarray(masks)
-        except Exception:
-            QtWidgets.QMessageBox.warning(self, "Export masks", "Mask data is invalid.")
-            return
-        if masks_np.ndim < 3 or masks_np.shape[0] == 0:
-            QtWidgets.QMessageBox.information(self, "Export masks", "No masks available for this image.")
-            return
-        combined = np.zeros((H, W), dtype=np.uint8)
-        for idx in range(masks_np.shape[0]):
+        thr = self.sld_score.value() / 100.0 if hasattr(self, "sld_score") else 0.0
+
+        saved_total = 0
+        for path, data in exportable:
+            masks = data.get("masks")
+            boxes = data.get("boxes") or []
+            names = data.get("names") or []
+            if masks is None:
+                continue
             try:
-                m_small = masks_np[idx]
-                m_bin = (m_small > 0.5).astype(np.uint8)
-                m_up = cv2.resize(m_bin, (W, H), interpolation=cv2.INTER_NEAREST)
-                combined = np.clip(combined + (m_up * 255), 0, 255).astype(np.uint8)
+                masks_np = np.asarray(masks)
             except Exception:
                 continue
-        try:
-            import cv2
-            ok = cv2.imwrite(save_path, combined)
-        except Exception:
-            ok = False
-        if ok:
-            QtWidgets.QMessageBox.information(self, "Export masks", f"Saved masks to:\n{save_path}")
+            if masks_np.ndim < 3 or masks_np.shape[0] == 0:
+                continue
+            # image size
+            try:
+                orig = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+                H, W = orig.shape[:2]
+            except Exception:
+                img = QtGui.QImage(path)
+                if img.isNull():
+                    pm = QtGui.QPixmap(path)
+                    W = pm.width(); H = pm.height()
+                else:
+                    W = img.width(); H = img.height()
+            if W <= 0 or H <= 0:
+                continue
+            # per-image folder
+            img_dir = target_dir / Path(path).stem
+            img_dir.mkdir(parents=True, exist_ok=True)
+            if mode == "class":
+                class_masks: dict[int, np.ndarray] = {}
+                class_names: dict[int, str] = {}
+                for idx in range(masks_np.shape[0]):
+                    try:
+                        conf = float(boxes[idx].get("conf", 0.0)) if idx < len(boxes) else 0.0
+                    except Exception:
+                        conf = 0.0
+                    if conf < thr:
+                        continue
+                    cls_id = boxes[idx].get("cls") if idx < len(boxes) else idx
+                    try:
+                        cid = int(cls_id) if cls_id is not None else idx
+                    except Exception:
+                        cid = idx
+                    try:
+                        cname = names[cid] if names and 0 <= cid < len(names) else str(cid)
+                    except Exception:
+                        cname = str(cid)
+                    try:
+                        m_small = masks_np[idx]
+                        m_bin = (m_small > 0.5).astype(np.uint8)
+                        m_up = cv2.resize(m_bin, (W, H), interpolation=cv2.INTER_NEAREST)
+                    except Exception:
+                        continue
+                    if cid not in class_masks:
+                        class_masks[cid] = m_up
+                        class_names[cid] = cname
+                    else:
+                        class_masks[cid] = np.clip(class_masks[cid] + m_up, 0, 1)
+                for cid, m_up in class_masks.items():
+                    out = (m_up * 255).astype(np.uint8)
+                    cname = class_names.get(cid, str(cid))
+                    fname = f"class_{cid}_{cname}.png" if cname else f"class_{cid}.png"
+                    fpath = img_dir / fname
+                    try:
+                        ok = cv2.imwrite(str(fpath), out)
+                    except Exception:
+                        ok = False
+                    if ok:
+                        saved_total += 1
+            else:
+                # instance-wise
+                for idx in range(masks_np.shape[0]):
+                    try:
+                        conf = float(boxes[idx].get("conf", 0.0)) if idx < len(boxes) else 0.0
+                    except Exception:
+                        conf = 0.0
+                    if conf < thr:
+                        continue
+                    cls_id = boxes[idx].get("cls") if idx < len(boxes) else idx
+                    try:
+                        cid = int(cls_id) if cls_id is not None else idx
+                    except Exception:
+                        cid = idx
+                    try:
+                        cname = names[cid] if names and 0 <= cid < len(names) else str(cid)
+                    except Exception:
+                        cname = str(cid)
+                    try:
+                        m_small = masks_np[idx]
+                        m_bin = (m_small > 0.5).astype(np.uint8)
+                        m_up = cv2.resize(m_bin, (W, H), interpolation=cv2.INTER_NEAREST)
+                        out = (m_up * 255).astype(np.uint8)
+                    except Exception:
+                        continue
+                    fname = f"class_{cid}_{cname}_{idx+1:02d}.png" if cname else f"class_{cid}_{idx+1:02d}.png"
+                    fpath = img_dir / fname
+                    try:
+                        ok = cv2.imwrite(str(fpath), out)
+                    except Exception:
+                        ok = False
+                    if ok:
+                        saved_total += 1
+        if saved_total > 0:
+            QtWidgets.QMessageBox.information(self, "Export masks", f"Saved {saved_total} mask file(s) to:\n{target_dir}")
         else:
-            QtWidgets.QMessageBox.warning(self, "Export masks", "Failed to save masks.")
+            QtWidgets.QMessageBox.information(self, "Export masks", "No masks were saved (filtered out or missing).")
 
     def _on_table_select(self):
         row = self.tbl_detections.currentRow()
@@ -1403,45 +1476,185 @@ class InferTab(QtWidgets.QWidget):
         self.sld_alpha.setValue(v)
         self._render_from_cache()
 
+    def _project_root(self) -> Path:
+        try:
+            return Path(__file__).resolve().parents[3]
+        except Exception:
+            return Path.cwd()
+
+    def _task_root(self) -> Path:
+        """Base path: DLSW/inference_results/<task-dir>."""
+        base = self._project_root() / "inference_results"
+        task_text = (self._active_task or self.cmb_type.currentText() or "").lower()
+        task_dir = "segment" if task_text.startswith("instance") else "detect"
+        root = base / task_dir
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _suggest_result_dir_name(self) -> str:
+        """Default result folder name with date + random suffix."""
+        date_str = datetime.date.today().strftime("%Y%m%d")
+        rand = random.randint(0, 9999)
+        return f"results_{date_str}_{rand:04d}"
+
+    def _build_default_export_dir(self) -> Path:
+        """Return/create default export directory with task/date/random suffix."""
+        root = self._task_root()
+        for _ in range(20):
+            candidate = root / self._suggest_result_dir_name()
+            if not candidate.exists():
+                candidate.mkdir(parents=True, exist_ok=True)
+                return candidate
+        fallback = root / f"results_{datetime.date.today().strftime('%Y%m%d')}_{int(time.time())}"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+    def _mask_to_polygons(self, mask_small, width: int, height: int) -> list[list[list[int]]]:
+        """Convert a single mask to polygons resized to (width,height)."""
+        try:
+            mask_np = np.asarray(mask_small)
+        except Exception:
+            return []
+        if mask_np.ndim < 2:
+            return []
+        try:
+            mask_bin = (mask_np > 0.5).astype(np.uint8)
+            mask_up = cv2.resize(mask_bin, (width, height), interpolation=cv2.INTER_NEAREST)
+        except Exception:
+            return []
+        try:
+            contours, _ = cv2.findContours(mask_up, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        except Exception:
+            contours = []
+        polygons: list[list[list[int]]] = []
+        for cnt in contours:
+            if cnt is None or len(cnt) < 3:
+                continue
+            pts: list[list[int]] = []
+            try:
+                for p in cnt:
+                    x, y = p[0]
+                    pts.append([int(x), int(y)])
+            except Exception:
+                continue
+            if len(pts) >= 3:
+                polygons.append(pts)
+        return polygons
+
+    def _prompt_mask_export_mode(self) -> str | None:
+        """Ask user whether to export masks by class or by instance (radio buttons)."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Export masks")
+        layout = QtWidgets.QVBoxLayout(dlg)
+        label = QtWidgets.QLabel("Choose mask export mode:")
+        layout.addWidget(label)
+        rb_class = QtWidgets.QRadioButton("Class-wise")
+        rb_instance = QtWidgets.QRadioButton("Instance-wise")
+        rb_class.setChecked(True)
+        layout.addWidget(rb_class)
+        layout.addWidget(rb_instance)
+        btn_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        layout.addWidget(btn_box)
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return None
+        return "instance" if rb_instance.isChecked() else "class"
+
+    def _suggest_mask_dir_name(self) -> str:
+        date_str = datetime.date.today().strftime("%Y%m%d")
+        rand = random.randint(0, 9999)
+        return f"masks_{date_str}_{rand:04d}"
+
+    def _ask_export_folder(self, title: str, *, for_masks: bool = False) -> Path | None:
+        """Ask user for result folder name and create under task root."""
+        base_root = self._task_root()
+        suggested = self._suggest_mask_dir_name() if for_masks else self._suggest_result_dir_name()
+        folder_name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            title,
+            "Folder name under inference_results/<task>:",
+            QtWidgets.QLineEdit.Normal,
+            suggested
+        )
+        if not ok:
+            return None
+        folder_name = (folder_name or "").strip()
+        if not folder_name:
+            folder_name = suggested
+        folder_name = folder_name.replace(os.sep, "_").replace("/", "_")
+        target_dir = base_root / folder_name
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, title, "Could not create target folder.")
+            return None
+        return target_dir
+
     def _export_txt(self):
-        # Export YOLO txt for each cached image result
+        """Export YOLO-style TXT for detection results (cls conf cx cy w h)."""
         if not self._result_cache:
             QtWidgets.QMessageBox.information(self, "Export", "No inference results to export.")
             return
-        exportable = [(path, data) for path, data in self._result_cache.items() if (data.get('boxes') or [])]
+        exportable = [(path, data) for path, data in self._result_cache.items() if (data.get("boxes") or [])]
         if not exportable:
             QtWidgets.QMessageBox.information(self, "Export", "No detections available to export.")
             return
-        from pathlib import Path
+        task_text = (self._active_task or self.cmb_type.currentText() or "").lower()
+        is_segment = task_text.startswith("instance")
+        # Ask user for result folder name (default suggested)
+        base_root = self._task_root()
+        suggested = self._suggest_result_dir_name()
+        folder_name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Result folder",
+            "Folder name under inference_results/<task>:",
+            QtWidgets.QLineEdit.Normal,
+            suggested
+        )
+        if not ok:
+            return
+        folder_name = (folder_name or "").strip()
+        if not folder_name:
+            folder_name = suggested
+        folder_name = folder_name.replace(os.sep, "_").replace("/", "_")
+        target_dir = base_root / folder_name
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Export TXT", "Could not create target folder.")
+            return
+        thr = self.sld_score.value() / 100.0 if hasattr(self, "sld_score") else 0.0
         written = 0
         for path, data in exportable:
             try:
-                boxes = data.get('boxes', []) or []
-                if path is None:
+                boxes = data.get("boxes", []) or []
+                if not path or not boxes:
                     continue
+                masks = data.get("masks") if is_segment else None
                 p = Path(path)
-                # load image size
                 img = QtGui.QImage(path)
                 if img.isNull():
                     pm = QtGui.QPixmap(path)
-                    W = pm.width(); H = pm.height()
+                    W = pm.width()
+                    H = pm.height()
                 else:
-                    W = img.width(); H = img.height()
+                    W = img.width()
+                    H = img.height()
                 if W <= 0 or H <= 0:
                     continue
                 lines = []
-                names = data.get('names') or []
-                for b in boxes:
-                    x1,y1,x2,y2 = b.get('xyxy', (0,0,0,0))
-                    # normalize
-                    cx = ((x1 + x2) / 2.0) / float(W)
-                    cy = ((y1 + y2) / 2.0) / float(H)
-                    ww = abs(x2 - x1) / float(W)
-                    hh = abs(y2 - y1) / float(H)
-                    # class id
-                    cid = b.get('cls')
+                names = data.get("names") or []
+                for idx, b in enumerate(boxes):
+                    try:
+                        conf = float(b.get("conf", 0.0))
+                    except Exception:
+                        conf = 0.0
+                    if conf < thr:
+                        continue
+                    cid = b.get("cls")
                     if cid is None:
-                        name = b.get('name')
+                        name = b.get("name")
                         try:
                             cid = names.index(name) if name in names else 0
                         except Exception:
@@ -1450,13 +1663,49 @@ class InferTab(QtWidgets.QWidget):
                         cid = int(cid)
                     except Exception:
                         cid = 0
-                    lines.append(f"{cid} {cx:.6f} {cy:.6f} {ww:.6f} {hh:.6f}")
-                out_txt = p.with_suffix('.txt')
-                out_txt.write_text("\n".join(lines), encoding='utf-8')
+                    if is_segment and masks is not None:
+                        try:
+                            if isinstance(masks, np.ndarray) and masks.shape[0] > idx:
+                                m_small = masks[idx]
+                                polygons = self._mask_to_polygons(m_small, int(W), int(H))
+                            else:
+                                polygons = []
+                        except Exception:
+                            polygons = []
+                        if not polygons:
+                            continue
+                        # Each contour on its own line, normalized
+                        for pts in polygons:
+                            coords = []
+                            try:
+                                for x, y in pts:
+                                    coords.append(f"{float(x)/float(W):.6f}")
+                                    coords.append(f"{float(y)/float(H):.6f}")
+                            except Exception:
+                                continue
+                            if not coords:
+                                continue
+                            lines.append(f"{cid} {conf:.6f} " + " ".join(coords))
+                    else:
+                        # detection: keep existing bbox YOLO format
+                        x1, y1, x2, y2 = b.get("xyxy", (0, 0, 0, 0))
+                        cx = ((x1 + x2) / 2.0) / float(W)
+                        cy = ((y1 + y2) / 2.0) / float(H)
+                        ww = abs(x2 - x1) / float(W)
+                        hh = abs(y2 - y1) / float(H)
+                        lines.append(f"{cid} {conf:.6f} {cx:.6f} {cy:.6f} {ww:.6f} {hh:.6f}")
+                if not lines:
+                    continue
+                out_txt = target_dir / f"{p.stem}.txt"
+                out_txt.parent.mkdir(parents=True, exist_ok=True)
+                out_txt.write_text("\n".join(lines), encoding="utf-8")
                 written += 1
             except Exception:
                 pass
-        QtWidgets.QMessageBox.information(self, "Export TXT", f"Exported TXT for {written} images.")
+        if written > 0:
+            QtWidgets.QMessageBox.information(self, "Export TXT", f"Saved {written} file(s) to:\n{target_dir}")
+        else:
+            QtWidgets.QMessageBox.information(self, "Export TXT", "Nothing to export after filtering.")
 
     def _export_json(self):
         # Aggregate all cached results into a single JSON file
@@ -1467,31 +1716,57 @@ class InferTab(QtWidgets.QWidget):
         if not exportable:
             QtWidgets.QMessageBox.information(self, "Export", "No detections available to export.")
             return
-        from pathlib import Path
         import json
-        # choose default directory
-        default_dir = None
-        if self._folder_root:
-            default_dir = self._folder_root
-        elif self._current_view_path:
-            default_dir = str(Path(self._current_view_path).parent)
-        else:
-            default_dir = str(Path.cwd())
+        task_text = (self._active_task or self.cmb_type.currentText() or "").lower()
+        is_segment = task_text.startswith("instance")
+        thr = self.sld_score.value() / 100.0 if hasattr(self, "sld_score") else 0.0
+        # Ask user for result folder name (default suggested)
+        base_root = self._task_root()
+        suggested = self._suggest_result_dir_name()
+        folder_name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Result folder",
+            "Folder name under inference_results/<task>:",
+            QtWidgets.QLineEdit.Normal,
+            suggested
+        )
+        if not ok:
+            return
+        folder_name = (folder_name or "").strip()
+        if not folder_name:
+            folder_name = suggested
+        # sanitize folder name a bit to avoid path traversal
+        folder_name = folder_name.replace(os.sep, "_").replace("/", "_")
+        target_dir = base_root / folder_name
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Export JSON", "Could not create target folder.")
+            return
+        default_path = target_dir / "inference_results.json"
         save_path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save inference_results.json",
-            str(Path(default_dir) / "inference_results.json"),
+            str(default_path),
             "JSON (*.json)"
         )
         if not save_path:
             return
+        # enforce file name
+        save_path = Path(save_path)
+        save_path = save_path.parent / "inference_results.json"
+        try:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         result = {}
         for path, data in exportable:
             try:
                 p = Path(path)
                 fname = p.name
-                boxes = data.get('boxes', []) or []
-                names = data.get('names', []) or []
+                boxes = data.get("boxes", []) or []
+                names = data.get("names", []) or []
+                masks = data.get("masks") if is_segment else None
                 # image size metadata
                 img = QtGui.QImage(path)
                 if img.isNull():
@@ -1499,12 +1774,14 @@ class InferTab(QtWidgets.QWidget):
                     W = pm.width(); H = pm.height()
                 else:
                     W = img.width(); H = img.height()
-                dets = []
-                for b in boxes:
-                    x1,y1,x2,y2 = b.get('xyxy', (0,0,0,0))
-                    cid = b.get('cls')
-                    name = b.get('name')
-                    conf = float(b.get('conf', 0.0)) if b.get('conf') is not None else 0.0
+                entries = []
+                for idx, b in enumerate(boxes):
+                    x1, y1, x2, y2 = b.get("xyxy", (0, 0, 0, 0))
+                    cid = b.get("cls")
+                    name = b.get("name")
+                    conf = float(b.get("conf", 0.0)) if b.get("conf") is not None else 0.0
+                    if conf < thr:
+                        continue
                     if cid is None:
                         try:
                             cid = names.index(name) if name in names else 0
@@ -1514,15 +1791,24 @@ class InferTab(QtWidgets.QWidget):
                         cid = int(cid)
                     except Exception:
                         cid = 0
-                    dets.append({
-                        'class_id': cid,
-                        'class_name': name if name is not None else str(cid),
-                        'confidence': conf,
-                        'bbox': {'x1': float(x1), 'y1': float(y1), 'x2': float(x2), 'y2': float(y2)}
-                    })
+                    entry = {
+                        "class_id": cid,
+                        "class_name": name if name is not None else str(cid),
+                        "confidence": conf,
+                        "bbox": {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)},
+                    }
+                    if is_segment and masks is not None:
+                        try:
+                            if isinstance(masks, np.ndarray) and masks.shape[0] > idx:
+                                m_small = masks[idx]
+                                entry["polygons"] = self._mask_to_polygons(m_small, int(W), int(H))
+                        except Exception:
+                            entry["polygons"] = []
+                    entries.append(entry)
+                key = "segmentations" if is_segment else "detections"
                 result[fname] = {
-                    'image_size': [int(W), int(H)],
-                    'detections': dets,
+                    "image_size": [int(W), int(H)],
+                    key: entries,
                 }
             except Exception:
                 pass

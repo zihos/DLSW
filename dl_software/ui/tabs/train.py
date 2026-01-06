@@ -502,7 +502,9 @@ class TrainTab(QtWidgets.QWidget):
         self.txt.setReadOnly(True)
         # Improve readability for console-like logs
         self.txt.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
-        self.txt.setPlaceholderText("Training logs appear here…")
+        self.txt.setPlaceholderText("Training logs will appear here...")
+        self._log_hint_active = False
+        self._show_log_hint()
         try:
             f = self.txt.font(); f.setFamily("JetBrains Mono, Consolas, Menlo, monospace"); self.txt.setFont(f)
         except Exception:
@@ -701,6 +703,32 @@ class TrainTab(QtWidgets.QWidget):
         self._emitted_epochs: set[str] = set()
         self._retry_counts: dict[str, int] = {}
 
+    def _show_log_hint(self):
+        """Display a faint hint so the empty log area has a visible purpose."""
+        self._log_hint_active = True
+        self.txt.setHtml(
+            '<div style="color:#9aa0a6; text-align:center; padding:12px 0;">'
+            "Training logs will appear here..."
+            "</div>"
+        )
+
+    def _clear_log_hint(self):
+        if self._log_hint_active:
+            self.txt.clear()
+            self._log_hint_active = False
+
+    def _append_log(self, text: str):
+        """Append a log line and keep the cursor pinned to the bottom."""
+        self._clear_log_hint()
+        self.txt.append(text)
+        try:
+            cursor = self.txt.textCursor()
+            cursor.movePosition(QtGui.QTextCursor.End)
+            self.txt.setTextCursor(cursor)
+            self.txt.ensureCursorVisible()
+        except Exception:
+            pass
+
     # ------ training control ------
     def start_training(self):
         if self.worker is not None:
@@ -710,19 +738,20 @@ class TrainTab(QtWidgets.QWidget):
         self._last_run_name = params.get("name") or self.ed_name.text().strip()
         # basic validation; let backend handle the rest
         if not params.get("data"):
-            self.txt.append("Select data.yaml first.")
+            self._append_log("Select data.yaml first.")
             return
         self._reset_training_info()
         aug_overrides = None
         if params.get("augment"):
             dlg = SimpleAugListDialog(self)
             if dlg.exec() != QtWidgets.QDialog.Accepted:
-                self.txt.append("Training cancelled: augmentation settings dialog closed.")
+                self._append_log("Training cancelled: augmentation settings dialog closed.")
                 return
             aug_overrides = dlg.values()
             if aug_overrides:
                 params["augment_overrides"] = aug_overrides
         self.txt.clear()
+        self._show_log_hint()
         self.prg.setValue(0)
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -762,11 +791,7 @@ class TrainTab(QtWidgets.QWidget):
             s_clean = s.strip()
             suppress_raw = bool(self._re_epoch_simple.match(s_clean) or self._re_epoch.match(s_clean))
             if not suppress_raw:
-                self.txt.append(s)
-                cursor = self.txt.textCursor()
-                cursor.movePosition(QtGui.QTextCursor.End)
-                self.txt.setTextCursor(cursor)
-                self.txt.ensureCursorVisible()
+                self._append_log(s)
         except Exception:
             pass
         # Parse and reflect summary metrics
@@ -840,7 +865,7 @@ class TrainTab(QtWidgets.QWidget):
         )
         line = self._format_epoch_line(ep, total, metrics, gpu_gb)
         if line:
-            self.txt.append(line)
+            self._append_log(line)
             self._emitted_epochs.add(ep)
 
     def _reset_training_info(self):
@@ -1383,7 +1408,7 @@ class TrainTab(QtWidgets.QWidget):
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     shutil.copyfile(str(src), str(dest_path))
-                    self.txt.append(f"Exported .pt → {dest_path}")
+                    self._append_log(f"Exported .pt → {dest_path}")
                 except Exception as e:
                     QtWidgets.QMessageBox.warning(self, "Export Model", f"Failed to save: {e}")
                 return
@@ -1396,7 +1421,7 @@ class TrainTab(QtWidgets.QWidget):
 
             imgsz = int(self.sp_imgsz.value()) if hasattr(self, 'sp_imgsz') else 640
             fmt_text = "ONNX" if fmt == "onnx" else "OpenVINO"
-            self.txt.append(f"Exporting to {fmt_text}…")
+            self._append_log(f"Exporting to {fmt_text}...")
             try:
                 model = YOLO(str(src))
                 if fmt == "onnx":
@@ -1436,7 +1461,7 @@ class TrainTab(QtWidgets.QWidget):
                             shutil.rmtree(export_dir)
                     except Exception:
                         pass
-                    self.txt.append(f"Exported ONNX → {dest_path}")
+                    self._append_log(f"Exported ONNX → {dest_path}")
                     return
 
                 # OpenVINO export
@@ -1470,9 +1495,9 @@ class TrainTab(QtWidgets.QWidget):
                         shutil.copytree(str(produced_dir), str(dest_root))
                 xmls = list(dest_root.rglob("*.xml"))
                 if xmls:
-                    self.txt.append("Exported OpenVINO → " + ", ".join(str(x) for x in xmls))
+                    self._append_log("Exported OpenVINO → " + ", ".join(str(x) for x in xmls))
                 else:
-                    self.txt.append(f"Exported OpenVINO → {dest_root}")
+                    self._append_log(f"Exported OpenVINO → {dest_root}")
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "Export Model", f"Export failed: {e}")
         except Exception as e:
@@ -1493,9 +1518,9 @@ class TrainTab(QtWidgets.QWidget):
                 found = [(str(p.resolve()), p.exists()) for p in candidates]
                 existing = [p for p, ex in found if ex]
                 if existing:
-                    self.txt.append("학습 완료: 모델 저장 위치")
+                    self._append_log("학습 완료: 모델 저장 위치")
                     for p in existing:
-                        self.txt.append(p)
+                        self._append_log(p)
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         # no export button in Train tab

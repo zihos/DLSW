@@ -1509,6 +1509,7 @@ class ExportDialog(QDialog):
         val = b2 - b1
         test = 100 - b2
         return train, val, test, b1, b2
+    
     def _refresh_train_preview(self):
         total = int(self._export_stats.get("total_images") or 0)
         rect_total = int(self._export_stats.get("rect_images") or 0)
